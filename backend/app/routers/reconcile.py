@@ -33,10 +33,13 @@ def align(body: AlignIn):
 
 @router.get("/batches")
 def batches(period_id: str | None = None, meter_type: str | None = None):
-    """类型批列表：可按账期+类型过滤，每行带 seal 同口径的 meter_type。"""
+    """类型批列表：只呈现水/电类型批，可再按账期+类型过滤。
+
+    未带类型的旧批（meter_type 非 water/electric）不得被当成类型批现行。
+    """
     conn = connect()
     try:
-        sql = "SELECT * FROM reconcile_batches WHERE 1=1"
+        sql = "SELECT * FROM reconcile_batches WHERE meter_type IN ('water','electric')"
         args: list = []
         if period_id:
             sql += " AND period_id=?"
@@ -57,21 +60,29 @@ def variances(
     period_id: str | None = None,
     meter_type: str | None = None,
 ):
-    """差额快照带 meter_type；过滤口径与分类型写闸一致。"""
+    """差额快照带 meter_type；以 meters 真实类型为准，不信行内自报。
+
+    过滤口径与分类型写闸一致：看的是表具真实类型，篡改行内类型不改变归属。
+    """
     conn = connect()
     try:
-        sql = "SELECT * FROM variances WHERE 1=1"
+        sql = (
+            "SELECT v.variance_id, v.batch_id, v.meter_id,"
+            "       COALESCE(m.meter_type, v.meter_type) AS meter_type,"
+            "       v.period_id, v.estimate_qty, v.actual_qty, v.delta, v.fate"
+            " FROM variances v LEFT JOIN meters m ON m.meter_id=v.meter_id WHERE 1=1"
+        )
         args: list = []
         if batch_id:
-            sql += " AND batch_id=?"
+            sql += " AND v.batch_id=?"
             args.append(batch_id)
         if period_id:
-            sql += " AND period_id=?"
+            sql += " AND v.period_id=?"
             args.append(period_id)
         if meter_type:
-            sql += " AND meter_type=?"
+            sql += " AND COALESCE(m.meter_type, v.meter_type)=?"
             args.append(meter_type)
-        sql += " ORDER BY meter_type, meter_id"
+        sql += " ORDER BY meter_type, v.meter_id"
         rows = conn.execute(sql, args).fetchall()
         return [dict(r) for r in rows]
     finally:

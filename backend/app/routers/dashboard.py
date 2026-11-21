@@ -1,17 +1,29 @@
 from __future__ import annotations
 from fastapi import APIRouter
 from app.db import connect
-from app.services.gate import get_setting
-from app.services import type_gate_cache
+from app.services.gate import get_setting, METER_TYPES
 
 router = APIRouter(tags=["dashboard"])
 
 
 @router.get("/health")
 def health():
-    ts = type_gate_cache.overview_type_sealed(conn)
+    conn = connect()
+    try:
+        # 已封计数与写闸同源（period_gates），不读取任何旁路 paint
+        sealed = {
+            r["meter_type"]: r["c"]
+            for r in conn.execute(
+                "SELECT meter_type, COUNT(*) AS c FROM period_gates WHERE status='sealed' GROUP BY meter_type"
+            ).fetchall()
+        }
         return {
-            "type_sealed": ts,"ok": True, "product": "抄表簿"}
+            "ok": True,
+            "product": "抄表簿",
+            "type_sealed": {t: 1 if sealed.get(t) else 0 for t in METER_TYPES},
+        }
+    finally:
+        conn.close()
 
 
 @router.get("/overview")
@@ -47,10 +59,15 @@ def overview():
         pending = conn.execute(
             "SELECT COUNT(*) AS c FROM variances WHERE fate='pending'"
         ).fetchone()["c"]
+        # 未决差额按表具真实类型分组：行内自报类型不参与归属
         pending_by_type = {
             r["meter_type"]: r["c"]
             for r in conn.execute(
-                "SELECT meter_type, COUNT(*) AS c FROM variances WHERE fate='pending' GROUP BY meter_type"
+                """SELECT COALESCE(m.meter_type, v.meter_type) AS meter_type,
+                          COUNT(*) AS c
+                   FROM variances v LEFT JOIN meters m ON m.meter_id=v.meter_id
+                   WHERE v.fate='pending'
+                   GROUP BY COALESCE(m.meter_type, v.meter_type)"""
             ).fetchall()
         }
         current = get_setting("current_period", "")
@@ -64,7 +81,9 @@ def overview():
         batches = [
             dict(r)
             for r in conn.execute(
-                "SELECT * FROM reconcile_batches ORDER BY created_at DESC LIMIT 8"
+                """SELECT * FROM reconcile_batches
+                   WHERE meter_type IN ('water','electric')
+                   ORDER BY created_at DESC LIMIT 8"""
             ).fetchall()
         ]
         return {

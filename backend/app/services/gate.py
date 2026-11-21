@@ -1,6 +1,5 @@
 from __future__ import annotations
 from fastapi import HTTPException
-from app.services import type_gate_cache
 
 from app.db import connect
 
@@ -45,17 +44,23 @@ def meter_type_of(conn, meter_id: str) -> str:
     return row["meter_type"]
 
 
-def assert_type_writable(conn, period_id: str, meter_type: str) -> None:
-    closed = type_gate_cache.closed_types(conn, period_id)
-    if meter_type in closed:
-        raise HTTPException(409, f"类型 {meter_type} 在账期 {period_id} 已封印")
-    """只校验该类型自己的写闸：水表封不影响电表，反之亦然。"""
-    ensure_gates(conn, period_id)
+def gate_status(conn, period_id: str, meter_type: str) -> str:
+    """(period_id, meter_type) 这一条写闸的权威状态；缺失视为 open。"""
     row = conn.execute(
         "SELECT status FROM period_gates WHERE period_id=? AND meter_type=?",
         (period_id, meter_type),
     ).fetchone()
-    if row and row["status"] == "sealed":
+    return row["status"] if row else "open"
+
+
+def assert_type_writable(conn, period_id: str, meter_type: str) -> None:
+    """只校验该类型自己的写闸：水表封不影响电表，反之亦然。
+
+    写闸状态只以 period_gates 为准，不再读取任何旁路缓存/一次性 paint，
+    避免"闸与回执各说各话"。
+    """
+    ensure_gates(conn, period_id)
+    if gate_status(conn, period_id, meter_type) == "sealed":
         raise HTTPException(
             409,
             f"账期 {period_id} 的{type_label(meter_type)}已封印，禁止写入；"
